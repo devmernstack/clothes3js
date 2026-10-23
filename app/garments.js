@@ -32,9 +32,25 @@ const distSeg = (px, py, [ax, ay], [bx, by]) => {
 
 // ---------------- shirt ----------------
 
-export function shirt({ style = 'work' } = {}) {
-  const western = style === 'western'
-  const fastener = western ? 'snap' : 'button'
+// shirt pattern pieces, shared with the workshop scene (Workshop.js)
+export const shirtParts = {
+  hemLine: (dy) => [...curve([-0.99, -1.5 + dy], [-0.69, -1.8 + dy], [0, -1.77 + dy], 8), ...curve([0, -1.77 + dy], [0.69, -1.8 + dy], [0.99, -1.5 + dy], 8).slice(1)],
+  cuff: (s) => [[s * 2.05, -0.48], [s * 1.6, -0.76], [s * 1.46, -0.47], [s * 1.88, -0.21]],
+  pocket: (x) => [[x - 0.24, 0.95], [x + 0.24, 0.95], [x + 0.24, 0.42], [x, 0.32], [x - 0.24, 0.42]],
+  flap: (x) => [[x - 0.26, 0.99], [x + 0.26, 0.99], [x + 0.26, 0.84], [x, 0.75], [x - 0.26, 0.84]],
+  leaf: (s) => [
+    ...curve([s * 0.1, 1.44], [s * 0.25, 1.57], [s * 0.45, 1.58], 6),
+    ...curve([s * 0.45, 1.58], [s * 0.44, 1.3], [s * 0.35, 1.04], 6).slice(1),
+    [s * 0.06, 1.24],
+  ],
+}
+export { inset }
+
+// style: 'work' (horn buttons), 'western' (pearl snaps, pointed yokes), 'hunter' (flannel; colourway sets
+// thread, sheen, inside colour and buttons)
+export function shirt({ style = 'work', thread, sheen, reverse, fastener: fast } = {}) {
+  const western = style === 'western', hunter = style === 'hunter'
+  const fastener = fast ?? (western ? 'snap' : hunter ? 'horn' : 'button')
 
   const body = (neckY) => (c) => {
     c.moveTo(-0.32, 1.52); c.lineTo(-1.05, 1.36); c.lineTo(-2.0, -0.5); c.lineTo(-1.62, -0.72)
@@ -43,17 +59,10 @@ export function shirt({ style = 'work' } = {}) {
     c.lineTo(1.0, 0.5); c.lineTo(1.62, -0.72); c.lineTo(2.0, -0.5); c.lineTo(1.05, 1.36); c.lineTo(0.32, 1.52)
     c.quad(0, neckY, -0.32, 1.52); c.close()
   }
-  const hemLine = (dy) => [...curve([-0.99, -1.5 + dy], [-0.69, -1.8 + dy], [0, -1.77 + dy], 8), ...curve([0, -1.77 + dy], [0.69, -1.8 + dy], [0.99, -1.5 + dy], 8).slice(1)]
-  const cuff = (s) => [[s * 2.05, -0.48], [s * 1.6, -0.76], [s * 1.46, -0.47], [s * 1.88, -0.21]]
-  const pocket = (x) => [[x - 0.24, 0.95], [x + 0.24, 0.95], [x + 0.24, 0.42], [x, 0.32], [x - 0.24, 0.42]]
+  const { hemLine, cuff, pocket, leaf } = shirtParts
   const flap = (x) => western
     ? [[x - 0.27, 0.99], [x + 0.27, 0.99], [x + 0.27, 0.9], [x + 0.12, 0.87], [x, 0.74], [x - 0.12, 0.87], [x - 0.27, 0.9]]
-    : [[x - 0.26, 0.99], [x + 0.26, 0.99], [x + 0.26, 0.84], [x, 0.75], [x - 0.26, 0.84]]
-  const leaf = (s) => [
-    ...curve([s * 0.1, 1.44], [s * 0.25, 1.57], [s * 0.45, 1.58], 6),
-    ...curve([s * 0.45, 1.58], [s * 0.44, 1.3], [s * 0.35, 1.04], 6).slice(1),
-    [s * 0.06, 1.24],
-  ]
+    : shirtParts.flap(x)
   const frontYoke = (s) => [[s * 0.1, 1.42], [s * 0.33, 1.53], [s * 1.05, 1.37], [s * 1.04, 1.12], [s * 0.78, 1.1], [s * 0.55, 0.99], [s * 0.32, 1.1], [s * 0.1, 1.12]]
   const backYoke = western
     ? [[-1.08, 1.4], [-0.3, 1.56], [0, 1.5], [0.3, 1.56], [1.08, 1.4], [1.04, 1.06], [0.5, 1.0], [0, 0.84], [-0.5, 1.0], [-1.04, 1.06]]
@@ -76,6 +85,7 @@ export function shirt({ style = 'work' } = {}) {
 
   return {
     hanger: 'shirt',
+    ...(hunter && { thread, sheen, reverse, tile: 0.6 }), // one check repeat = 0.6 units
     bbox: [-2.15, -1.95, 2.15, 1.72],
     bulge: 0.1,
     outline: { front: body(1.12), back: body(1.44) },
@@ -95,7 +105,7 @@ export function shirt({ style = 'work' } = {}) {
       },
       backInner(p) {
         p.fill((c) => c.poly(backYoke), p.denim) // inner yoke
-        p.label(0, 1.37, 0.26, 0.1, ['INDIGO MILL', 'M'])
+        p.label(0, 1.37, 0.26, 0.1, ['BHARAT MILL', 'M'])
       },
     },
     overlays: [
@@ -246,7 +256,7 @@ export function jeans({ cuff = false, distressed = false } = {}) {
       },
       backInner(p) {
         p.fill(waistband(1.96), p.denim)
-        p.label(0, 1.7, 0.24, 0.11, ['INDIGO MILL', 'W32 L34'])
+        p.label(0, 1.7, 0.24, 0.11, ['BHARAT MILL', 'W32 L34'])
       },
     },
     overlays: [
@@ -292,7 +302,7 @@ export function jeans({ cuff = false, distressed = false } = {}) {
         side: 'back', lift: 0.024, material: 'leather', pieces: (c) => c.rect(0.4, 1.55, 0.82, 1.76),
         paint(p) {
           p.stitch(inset([[0.4, 1.55], [0.82, 1.55], [0.82, 1.76], [0.4, 1.76]], 0.018), { color: '#e3cfa4' })
-          p.text('INDIGO MILL', 0.61, 1.68, 0.05, '#3a1f0e', { emboss: true })
+          p.text('BHARAT MILL', 0.61, 1.68, 0.05, '#3a1f0e', { emboss: true })
           p.text('LOT 101 · SELVEDGE', 0.61, 1.615, 0.022, '#3a1f0e', { emboss: true })
         },
       },

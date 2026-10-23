@@ -4,6 +4,7 @@ import { useTexture } from '@react-three/drei'
 import { Fragment, useEffect, useMemo, useRef } from 'react'
 import * as THREE from 'three'
 import { GARMENTS } from './garments'
+import { fabric } from './fabric'
 
 // Denim is heavy and stiff: it hangs, sways a little and settles fast. Tune here.
 const CELL = 0.08 // cloth grid spacing (world units)
@@ -15,7 +16,8 @@ const DAMPING = 0.94 // velocity kept per step; lower = less swing
 const WIND = 0.12
 const INERTIA = 0.3 // how much the cloth lags behind when the hanger moves
 const SPIN_INERTIA = 0.08 // same, when the hanger turns (sleeves would fling out)
-const MEMORY = 0.006 // denim keeps its shape: a weak pull back towards the resting drape
+const BASE_MEMORY = 0.006 // denim keeps its shape: a weak pull back towards the resting drape
+const FORM_MARGIN = 0.03 // cloth thickness over the dress form
 const MIN_GAP = 0.012 // front and back layers never pass through each other
 const THREAD = '#d9923a'
 
@@ -48,8 +50,10 @@ function painter(G, surf, el, diffuse, mirror = false) {
   const ctx = el.getContext('2d'), sx = G.sx ?? 1, m = mirror ? -1 : 1
   const [x0, y0, x1, y1] = surf.bbox, k = surf.w / (x1 - x0)
   const X = (x) => (m * x * sx - x0) * k, Y = (y) => (y1 - y) * k, S = (l) => l * k
+  const thread = G.thread ?? THREAD, tile = G.tile ?? 0.9
+  // anchored at the garment origin, so every piece cut from the cloth lines up (checks match)
   const denim = ctx.createPattern(diffuse, 'repeat')
-  denim.setTransform(new DOMMatrix().scale(S(0.9) / diffuse.width))
+  denim.setTransform(new DOMMatrix().translate(X(0), Y(0)).scale(S(tile) / diffuse.width))
 
   const api = {
     moveTo: (x, y) => ctx.moveTo(X(x), Y(y)),
@@ -81,12 +85,12 @@ function painter(G, surf, el, diffuse, mirror = false) {
     fill(fn, style) { path(fn); ctx.fillStyle = style; ctx.fill() },
     clip(fn) { path(fn); ctx.clip() },
     // inside face of denim: the pale weft side
-    reverse(fn) { p.fill(fn, denim); p.fill(fn, 'rgba(214,222,236,.62)') },
+    reverse(fn) { p.fill(fn, denim); p.fill(fn, G.reverse ?? 'rgba(214,222,236,.62)') },
     stitch(pts, o = {}) {
       const run = (q) => {
         ctx.save(); ctx.lineCap = 'round'; ctx.setLineDash([S(0.03), S(0.02)])
         ctx.lineWidth = S(0.02); ctx.strokeStyle = 'rgba(0,0,20,.28)'; trace(q, o.curve); ctx.stroke() // thread sinks into the cloth
-        ctx.lineWidth = S(0.011); ctx.strokeStyle = o.color || THREAD; trace(q, o.curve); ctx.stroke()
+        ctx.lineWidth = S(0.011); ctx.strokeStyle = o.color || thread; trace(q, o.curve); ctx.stroke()
         ctx.translate(-S(0.002), -S(0.002)); ctx.lineWidth = S(0.004); ctx.strokeStyle = 'rgba(255,236,200,.5)'; trace(q, o.curve); ctx.stroke()
         ctx.restore()
       }
@@ -129,10 +133,10 @@ function painter(G, surf, el, diffuse, mirror = false) {
     bartack(x, y, len, vertical) {
       const h = len / 2, pts = vertical ? [[x, y - h], [x, y + h]] : [[x - h / sx, y], [x + h / sx, y]]
       ctx.save(); ctx.lineWidth = S(0.018); ctx.strokeStyle = 'rgba(0,0,20,.35)'; trace(pts); ctx.stroke()
-      ctx.lineWidth = S(0.012); ctx.strokeStyle = THREAD; trace(pts); ctx.stroke(); ctx.restore()
+      ctx.lineWidth = S(0.012); ctx.strokeStyle = thread; trace(pts); ctx.stroke(); ctx.restore()
     },
     buttonhole(x, y) {
-      p.fill((c) => c.rect(x - 0.01, y + 0.035, x + 0.01, y - 0.035), THREAD)
+      p.fill((c) => c.rect(x - 0.01, y + 0.035, x + 0.01, y - 0.035), thread)
       p.fill((c) => c.rect(x - 0.003, y + 0.03, x + 0.003, y - 0.03), 'rgba(0,0,10,.8)')
     },
     text(str, x, y, size, color, o = {}) {
@@ -359,8 +363,20 @@ function buildSim(G, samplers) {
   }
 }
 
+// dress form: elliptical cross-sections [y, half-width, half-depth], top to bottom
+const FORM = [[1.95, 0.16, 0.16], [1.5, 0.16, 0.16], [1.44, 0.45, 0.3], [1.36, 0.8, 0.33], [1.2, 0.88, 0.37], [0.7, 0.8, 0.41], [-0.2, 0.72, 0.36], [-1.0, 0.79, 0.4], [-1.35, 0.75, 0.37], [-1.42, 0.3, 0.2]]
+const formAt = (y) => {
+  if (y > FORM[0][0] || y < FORM[FORM.length - 1][0]) return null
+  for (let i = 1; i < FORM.length; i++) if (y >= FORM[i][0]) {
+    const [y0, a0, b0] = FORM[i - 1], [y1, a1, b1] = FORM[i], t = (y - y1) / (y0 - y1)
+    return [a1 + (a0 - a1) * t, b1 + (b0 - b1) * t]
+  }
+  return null
+}
+
 function step(s, t, grab) {
   const { pos, prev, rest, pinned, free, links, welds, gaps, tether, tlen } = s
+  const MEMORY = s.memory ?? BASE_MEMORY
   const g = GRAVITY * STEP * STEP, w = WIND * STEP * STEP
   for (let f = 0; f < free.length; f++) {
     const i = free[f] * 3, x = pos[i], y = pos[i + 1], z = pos[i + 2]
@@ -399,6 +415,13 @@ function step(s, t, grab) {
       const d = Math.sqrt(ex * ex + ey * ey + ez * ez)
       if (d > tlen[k]) { const c = (d - tlen[k]) / d; pos[i] -= ex * c; pos[i + 1] -= ey * c; pos[i + 2] -= ez * c }
     }
+    // the dress form pushes the cloth out to its surface
+    if (s.formY !== undefined) for (let f = 0; f < free.length; f++) {
+      const i = free[f] * 3, r = formAt(pos[i + 1] - s.formY)
+      if (!r) continue
+      const a = r[0] + FORM_MARGIN, b = r[1] + FORM_MARGIN, x = pos[i], z = pos[i + 2], e = (x / a) ** 2 + (z / b) ** 2
+      if (e < 1 && e > 1e-6) { const k = 1 / Math.sqrt(e); pos[i] = x * k; pos[i + 2] = z * k }
+    }
     // a held point follows the cursor softly; denim resists being pulled
     if (grab.k >= 0) { const i = grab.k * 3; for (let c = 0; c < 3; c++) pos[i + c] += (grab.target[c] - pos[i + c]) * 0.2 }
   }
@@ -413,7 +436,7 @@ function clothMaterial(map, alphaMap, nor, rough, o = {}) {
     map, alphaMap, alphaTest: 0.5, side: o.side ?? THREE.FrontSide, shadowSide: THREE.DoubleSide,
     normalMap: leather ? null : nor, normalScale: new THREE.Vector2(1.3, 1.3),
     roughnessMap: leather ? null : rough, roughness: leather ? 0.55 : 1,
-    sheen: leather ? 0 : 1, sheenRoughness: 0.8, sheenColor: new THREE.Color(o.inner ? '#c9d4ea' : '#8fa8d8'),
+    sheen: leather ? 0 : 1, sheenRoughness: 0.8, sheenColor: new THREE.Color(o.sheen ?? (o.inner ? '#c9d4ea' : '#8fa8d8')),
     clearcoat: leather ? 0.25 : 0, clearcoatRoughness: 0.6,
     polygonOffset: !!o.depth, polygonOffsetFactor: -(o.depth ?? 0), polygonOffsetUnits: -(o.depth ?? 0) * 4,
   })
@@ -421,13 +444,15 @@ function clothMaterial(map, alphaMap, nor, rough, o = {}) {
 
 const MATS = {
   horn: new THREE.MeshPhysicalMaterial({ color: '#e6dfcf', roughness: 0.35, clearcoat: 0.7 }),
+  hornDark: new THREE.MeshPhysicalMaterial({ color: '#3b2a1f', roughness: 0.3, clearcoat: 0.8 }),
   thread: new THREE.MeshStandardMaterial({ color: '#c9b48c', roughness: 0.9 }),
   silver: new THREE.MeshStandardMaterial({ color: '#d9d9d9', metalness: 1, roughness: 0.25 }),
   pearl: new THREE.MeshPhysicalMaterial({ color: '#f3efe8', roughness: 0.15, clearcoat: 1, iridescence: 1, iridescenceIOR: 1.6 }),
   copper: new THREE.MeshStandardMaterial({ color: '#b87333', metalness: 1, roughness: 0.38 }),
 }
 const lathe = (pts) => new THREE.LatheGeometry(pts.map(([x, y]) => new THREE.Vector2(x, y)), 28)
-const HARDWARE = {
+export const HARDWARE = {
+  horn: () => { const g = HARDWARE.button(); g.children[0].material = MATS.hornDark; return g },
   button: () => {
     const g = new THREE.Group()
     g.add(new THREE.Mesh(lathe([[0, 0], [0.042, 0], [0.045, 0.005], [0.043, 0.011], [0.032, 0.011], [0.028, 0.008], [0, 0.008]]), MATS.horn))
@@ -458,9 +483,10 @@ const HARDWARE = {
 function build(G, diffuse, nor, rough) {
   const sx = G.sx ?? 1
   const tex = (c, srgb) => { const t = new THREE.CanvasTexture(c); if (srgb) t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 8; return t }
-  // weave normal/roughness maps tiled to match the painted denim (one tile = 0.9 units, anchored top-left)
+  // weave normal/roughness maps tiled to the cloth repeat
+  const tile = G.tile ?? 0.9
   const tiled = (t, b) => {
-    const c = t.clone(), rx = (b[2] - b[0]) / 0.9, ry = (b[3] - b[1]) / 0.9
+    const c = t.clone(), rx = (b[2] - b[0]) / tile, ry = (b[3] - b[1]) / tile
     c.wrapS = c.wrapT = THREE.RepeatWrapping; c.anisotropy = 8; c.repeat.set(rx, ry); c.offset.set(0, Math.ceil(ry) - ry)
     return c
   }
@@ -492,8 +518,8 @@ function build(G, diffuse, nor, rough) {
     const alpha = tex(surf.alpha), n = tiled(nor, G.bbox), r = tiled(rough, G.bbox)
     return {
       side, base, geometry, depth: depthMat(alpha),
-      outer: clothMaterial(tex(surf.color, true), alpha, n, r),
-      inner: clothMaterial(tex(inner.color, true), alpha, n, r, { side: THREE.BackSide, inner: true }),
+      outer: clothMaterial(tex(surf.color, true), alpha, n, r, { sheen: G.sheen }),
+      inner: clothMaterial(tex(inner.color, true), alpha, n, r, { side: THREE.BackSide, inner: true, sheen: G.sheen }),
     }
   })
 
@@ -519,7 +545,7 @@ function build(G, diffuse, nor, rough) {
     const alpha = tex(surf.alpha)
     return {
       side: o.side, geometry, parent, lift, pts: new Int32Array(pts), depth: depthMat(alpha),
-      outer: clothMaterial(tex(surf.color, true), alpha, tiled(nor, surf.bbox), tiled(rough, surf.bbox), { material: o.material, depth: i + 1 }),
+      outer: clothMaterial(tex(surf.color, true), alpha, tiled(nor, surf.bbox), tiled(rough, surf.bbox), { material: o.material, depth: i + 1, sheen: G.sheen }),
     }
   })
 
@@ -597,25 +623,74 @@ function Hanger({ type }) {
 
 // ---------------- component ----------------
 
-export const textureUrls = (tex) => ['diff', 'nor', 'rough'].map((m) => `/textures/${tex}/${m}.jpg`)
+// a linen-covered dress form built from the FORM cross-sections, on a wooden stand
+function DressForm(props) {
+  const geometry = useMemo(() => {
+    const rings = 60, seg = 48, pos = [], index = []
+    const [top, bottom] = [FORM[0][0], FORM[FORM.length - 1][0]]
+    for (let r = 0; r <= rings; r++) {
+      const y = top - ((top - bottom) * r) / rings, [a, b] = formAt(Math.min(top, Math.max(bottom, y))) ?? [0, 0]
+      for (let k = 0; k <= seg; k++) { const t = (k / seg) * Math.PI * 2; pos.push(a * Math.sin(t), y, b * Math.cos(t)) }
+    }
+    for (let r = 0; r < rings; r++) for (let k = 0; k < seg; k++) {
+      const i = r * (seg + 1) + k
+      index.push(i, i + seg + 1, i + 1, i + 1, i + seg + 1, i + seg + 2)
+    }
+    const g = new THREE.BufferGeometry()
+    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); g.setIndex(index); g.computeVertexNormals()
+    return g
+  }, [])
+  const wood = <meshStandardMaterial color="#5a3d27" roughness={0.5} />
+  return (
+    <group {...props}>
+      <mesh geometry={geometry} castShadow receiveShadow><meshPhysicalMaterial color="#dccfb8" roughness={0.85} sheen={1} sheenColor="#fff4e0" /></mesh>
+      <mesh position={[0, 2.0, 0]} castShadow><sphereGeometry args={[0.12, 24, 16]} />{wood}</mesh>
+      <mesh position={[0, -2.4, 0]} castShadow><cylinderGeometry args={[0.04, 0.04, 2]} />{wood}</mesh>
+    </group>
+  )
+}
 
-export default function Garment({ product, motion }) {
-  const G = useMemo(() => GARMENTS[product.type](product), [product])
-  const [diff, nor, rough] = useTexture(textureUrls(product.texture))
-  const g = useMemo(() => build(G, diff.image, nor, rough), [G, diff, nor, rough])
+const ease = (t) => t * t * (3 - 2 * t)
+
+// flannel garments paint their colour (fabric.js) and only take the weave maps from disk
+export const textureUrls = (product) => (product.fabric === 'flannel' ? ['nor', 'rough'] : ['diff', 'nor', 'rough']).map((m) => `/textures/${product.texture}/${m}.jpg`)
+
+// fit: optional function returning 0..1 each frame. Above 0 the garment shows; the shirt lifts
+// on its hanger, a dress form fades in standing still below it, then the shirt is lowered onto
+// the form through its open hem; at 1 the form is wearing it.
+export default function Garment({ product, variant, motion, fit }) {
+  const G = useMemo(() => GARMENTS[product.type]({ ...product, ...variant }), [product, variant])
+  const maps = useTexture(textureUrls(product)), [nor, rough] = maps.slice(-2)
+  const diffuse = product.fabric === 'flannel' ? fabric(variant.id) : maps[0].image
+  const g = useMemo(() => build(G, diffuse, nor, rough), [G, diffuse, nor, rough])
   useEffect(() => () => dispose(g), [g])
 
-  const group = useRef()
+  const group = useRef(), hanger = useRef(), form = useRef()
   const grab = useRef({ k: -1, target: new Float32Array(3), plane: new THREE.Plane() })
-  const last = useRef({ x: 0, y: 1.5, rot: 0, t: 0, acc: 0 })
+  const last = useRef({ x: 0, y: 0.35, rot: 0, t: 0, acc: 0 })
 
   useFrame((state, delta) => {
     const grp = group.current, L = last.current, { pos, prev, free } = g.sim
     motion?.(grp, state)
-    grp.position.y += (0.35 - grp.position.y) * 0.06 // settle onto the rail
+    if (fit) {
+      const f = fit(), c = (v) => Math.min(1, Math.max(0, v))
+      const down = ease(c((f - 0.35) / 0.6)), lift = 4.3 * ease(c(f / 0.35)) * (1 - down) // how high the shirt is above the form
+      grp.visible = f > 0.001
+      // the form stays put in the world; only the shirt (this group) moves up and back down
+      grp.position.y = grp.userData.y = 0.35 + 0.88 * lift
+      g.sim.formY = f > 0.35 ? -lift : undefined
+      g.sim.memory = BASE_MEMORY * (1 - down) // the shirt gives up its flat shape to take the form's
+      form.current.visible = f > 0.28; form.current.position.y = -lift
+      const fadeIn = ease(c((f - 0.28) / 0.15))
+      form.current.traverse((m) => { if (m.material) { m.material.transparent = fadeIn < 1; m.material.opacity = fadeIn } })
+      hanger.current.visible = f < 0.9
+    }
+    grp.position.y += ((grp.userData.y ?? 0.35) - grp.position.y) * 0.06 // settle onto the rail (motion can move the rail)
 
     // the hanger moved: let the cloth lag behind a little (in the hanger's frame)
-    const dx = (grp.position.x - L.x) * INERTIA, dy = (grp.position.y - L.y) * INERTIA, dr = (grp.rotation.y - L.rot) * SPIN_INERTIA
+    // on the dress form the shirt turns and travels with the form, so it barely lags at all
+    const worn = 1 - (g.sim.memory ?? BASE_MEMORY) / BASE_MEMORY, lag = 1 - 0.85 * worn
+    const dx = (grp.position.x - L.x) * INERTIA * lag, dy = (grp.position.y - L.y) * INERTIA * lag, dr = (grp.rotation.y - L.rot) * SPIN_INERTIA * (1 - worn)
     L.x = grp.position.x; L.y = grp.position.y; L.rot = grp.rotation.y
     for (let f = 0; f < free.length; f++) for (const a of [pos, prev]) {
       const i = free[f] * 3, x = a[i], z = a[i + 2]
@@ -672,8 +747,9 @@ export default function Garment({ product, motion }) {
   }
 
   return (
-    <group ref={group} position={[0, 1.5, 0]} scale={0.88} {...handlers}>
-      <Hanger type={G.hanger} />
+    <group ref={group} position={[0, 0.35, 0]} scale={0.88} {...handlers}>
+      <group ref={hanger}><Hanger type={G.hanger} /></group>
+      {fit && <DressForm ref={form} visible={false} />}
       {g.layers.map((l) => (
         <Fragment key={l.side}>
           <mesh geometry={l.geometry} material={l.outer} customDepthMaterial={l.depth} castShadow receiveShadow />
